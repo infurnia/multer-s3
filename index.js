@@ -184,7 +184,7 @@ S3Storage.prototype._handleFile = function (req, file, cb) {
   collect(this, req, file, function (err, opts) {
     if (err) return cb(err)
 
-    var currentSize = 0
+    // var currentSize = 0
 
     var params = {
       Bucket: opts.bucket,
@@ -196,42 +196,62 @@ S3Storage.prototype._handleFile = function (req, file, cb) {
       StorageClass: opts.storageClass,
       ServerSideEncryption: opts.serverSideEncryption,
       SSEKMSKeyId: opts.sseKmsKeyId,
-      Body: (opts.replacementStream || file.stream)
     }
 
-    if (opts.contentDisposition) {
-      params.ContentDisposition = opts.contentDisposition
-    }
 
-    if (opts.contentEncoding) {
-      params.ContentEncoding = opts.contentEncoding
-    }
 
-    var upload = this.s3.upload(params)
 
-    upload.on('httpUploadProgress', function (ev) {
-      if (ev.total) currentSize = ev.total
-    })
+    //put the input stream into a buffer
+    let inputStream = (opts.replacementStream || file.stream);
+    let chunks = [];
+    let fileBuffer ; 
+    //define the events on the stream
+    //1. error event
+    inputStream.on('error', (err) => {
+      throw err;
+    });
+    //2. data event 
+    inputStream.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+    //3. end event
+    inputStream.on('end', ()=> {
+      
+      fileBuffer = Buffer.concat(chunks);
+      
+      //set the remaining options
+      if (opts.contentDisposition) {
+        params.ContentDisposition = opts.contentDisposition
+      }
+  
+      if (opts.contentEncoding) {
+        params.ContentEncoding = opts.contentEncoding
+      }
 
-    upload.send(function (err, result) {
-      if (err) return cb(err)
+      //set the body of the s3 putobject request to the buffer just created
+      params.Body = fileBuffer;
 
-      cb(null, {
-        size: currentSize,
-        bucket: opts.bucket,
-        key: opts.key,
-        acl: opts.acl,
-        contentType: opts.contentType,
-        contentDisposition: opts.contentDisposition,
-        contentEncoding: opts.contentEncoding,
-        storageClass: opts.storageClass,
-        serverSideEncryption: opts.serverSideEncryption,
-        metadata: opts.metadata,
-        location: result.Location,
-        etag: result.ETag,
-        versionId: result.VersionId
-      })
-    })
+      //send the putobject request to s3
+      this.s3.putObject(params, function (err, result){
+        if (err) return cb(err);
+  
+        cb(null, {
+          bucket: opts.bucket,
+          key: opts.key,
+          path: opts.key,
+          acl: opts.acl,
+          contentType: opts.contentType,
+          contentDisposition: opts.contentDisposition,
+          contentEncoding: opts.contentEncoding,
+          storageClass: opts.storageClass,
+          serverSideEncryption: opts.serverSideEncryption,
+          metadata: opts.metadata,
+          etag: result.ETag,
+          versionId: result.VersionId
+        });
+      });
+
+    });
   })
 }
 
