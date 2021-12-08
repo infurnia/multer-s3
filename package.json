@@ -1,7 +1,7 @@
 {
-  "name": "multer-s3v3",
+  "name": "@infurnia/multer-s3",
   "version": "2.10.0",
-  "description": "Streaming multer storage engine for AWS S3",
+  "description": "Streaming multer storage engine for AWS S3 with customisation for support AWS S3 V3 API",
   "main": "index.js",
   "scripts": {
     "test": "standard && mocha test/basic.js"
