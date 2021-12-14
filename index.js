@@ -21,6 +21,8 @@ var defaultStorageClass = staticValue('STANDARD')
 var defaultSSE = staticValue(null)
 var defaultSSEKMS = staticValue(null)
 
+var defaultPriorityLevel = staticValue(1)
+
 // Regular expression to detect svg file content, inspired by: https://github.com/sindresorhus/is-svg/blob/master/index.js
 // It is not always possible to check for an end tag if a file is very big. The firstChunk, see below, might not be the entire file.
 var svgRegex = /^\s*(?:<\?xml[^>]*>\s*)?(?:<!doctype svg[^>]*>\s*)?<svg[^>]*>/i
@@ -65,7 +67,8 @@ function autoContentType (req, file, cb) {
 
 function collect (storage, req, file, cb) {
   parallel([
-    storage.getBucket.bind(storage, req, file),
+    storage.getBucketNamesAndRegions.bind(storage, req, file),
+    storage.getPriorityLevel.bind(storage, req, file),
     storage.getKey.bind(storage, req, file),
     storage.getAcl.bind(storage, req, file),
     storage.getMetadata.bind(storage, req, file),
@@ -82,34 +85,41 @@ function collect (storage, req, file, cb) {
       if (err) return cb(err)
 
       cb.call(storage, null, {
-        bucket: values[0],
-        key: values[1],
-        acl: values[2],
-        metadata: values[3],
-        cacheControl: values[4],
-        contentDisposition: values[5],
-        storageClass: values[6],
+        bucket_names_and_regions: values[0],
+        priorityLevel: values[1],
+        key: values[2],
+        acl: values[3],
+        metadata: values[4],
+        cacheControl: values[5],
+        contentDisposition: values[6],
+        storageClass: values[7],
         contentType: contentType,
         replacementStream: replacementStream,
-        serverSideEncryption: values[7],
-        sseKmsKeyId: values[8],
-        contentEncoding: values[9]
+        serverSideEncryption: values[8],
+        sseKmsKeyId: values[9],
+        contentEncoding: values[10]
       })
     })
   })
 }
 
 function S3Storage (opts) {
-  switch (typeof opts.s3) {
-    case 'object': this.s3 = opts.s3; break
-    default: throw new TypeError('Expected opts.s3 to be object')
+  switch (typeof opts.s3s) {
+    case 'object': this.s3s = opts.s3s; break;
+    default: throw new TypeError('Expected opts.s3s to be object')
   }
 
-  switch (typeof opts.bucket) {
-    case 'function': this.getBucket = opts.bucket; break
-    case 'string': this.getBucket = staticValue(opts.bucket); break
-    case 'undefined': throw new Error('bucket is required')
-    default: throw new TypeError('Expected opts.bucket to be undefined, string or function')
+  switch (typeof opts.bucket_names_and_regions) {
+    case 'function': this.getBucketNamesAndRegions = opts.bucket_names_and_regions; break
+    case 'object': this.getBucketNamesAndRegions = staticValue(opts.bucket_names_and_regions); break;
+    default: throw new TypeError('Expected opts.bucket_names_and_regions to be undefined or array of objects')
+  }
+
+  switch (typeof opts.priorityLevel) {
+    case 'function': this.getPriorityLevel = opts.priorityLevel; break;
+    case 'number': this.getPriorityLevel = staticValue(opts.priorityLevel); break;
+    case 'undefined': this.getPriorityLevel = defaultPriorityLevel; break;
+    default: throw new TypeError(`Expected opts.priorityLevel to be number or function or undefined`);
   }
 
   switch (typeof opts.key) {
@@ -184,23 +194,6 @@ S3Storage.prototype._handleFile = function (req, file, cb) {
   collect(this, req, file, function (err, opts) {
     if (err) return cb(err)
 
-    // var currentSize = 0
-
-    var params = {
-      Bucket: opts.bucket,
-      Key: opts.key,
-      ACL: opts.acl,
-      CacheControl: opts.cacheControl,
-      ContentType: opts.contentType,
-      Metadata: opts.metadata,
-      StorageClass: opts.storageClass,
-      ServerSideEncryption: opts.serverSideEncryption,
-      SSEKMSKeyId: opts.sseKmsKeyId,
-    }
-
-
-
-
     //put the input stream into a buffer
     let inputStream = (opts.replacementStream || file.stream);
     let chunks = [];
@@ -218,46 +211,105 @@ S3Storage.prototype._handleFile = function (req, file, cb) {
     inputStream.on('end', ()=> {
       
       fileBuffer = Buffer.concat(chunks);
-      
-      //set the remaining options
-      if (opts.contentDisposition) {
-        params.ContentDisposition = opts.contentDisposition
-      }
-  
-      if (opts.contentEncoding) {
-        params.ContentEncoding = opts.contentEncoding
+
+      //array which holds the PutObject promises
+      let primary_put_object_promises = [];
+      let secondary_put_object_promises = [];
+
+      // console.info('bucket_names_and_regions', opts.bucket_names_and_regions);
+
+      //loop over the bucket_names_and_regions (primary only)
+      for (let i=0; i<opts.bucket_names_and_regions.length; i++) {
+        let bucket_name_and_region = opts.bucket_names_and_regions[i];
+        let params = {
+          Bucket: bucket_name_and_region.bucket_name,
+          Key: opts.key,
+          ACL: opts.acl,
+          CacheControl: opts.cacheControl,
+          ContentType: opts.contentType,
+          Metadata: opts.metadata,
+          StorageClass: opts.storageClass,
+          ServerSideEncryption: opts.serverSideEncryption,
+          SSEKMSKeyId: opts.sseKmsKeyId,
+        };
+        //set the remaining options
+        if (opts.contentDisposition) {
+          params.ContentDisposition = opts.contentDisposition
+        }
+        if (opts.contentEncoding) {
+          params.ContentEncoding = opts.contentEncoding
+        }
+        //set the body of the s3 putobject request to the buffer just created
+        params.Body = fileBuffer;
+
+        //put the object
+        if (i<opts.priorityLevel) {
+          primary_put_object_promises.push(this.s3s[bucket_name_and_region.region].putObject(params));
+        }
+        else {
+          secondary_put_object_promises.push(this.s3s[bucket_name_and_region.region].putObject(params));
+        }
       }
 
-      //set the body of the s3 putobject request to the buffer just created
-      params.Body = fileBuffer;
-
-      //send the putobject request to s3
-      this.s3.putObject(params, function (err, result){
-        if (err) return cb(err);
-  
-        cb(null, {
-          bucket: opts.bucket,
-          key: opts.key,
-          path: opts.key,
-          acl: opts.acl,
-          contentType: opts.contentType,
-          contentDisposition: opts.contentDisposition,
-          contentEncoding: opts.contentEncoding,
-          storageClass: opts.storageClass,
-          serverSideEncryption: opts.serverSideEncryption,
-          metadata: opts.metadata,
-          etag: result.ETag,
-          versionId: result.VersionId
+      //define a promise.all the secondary upload
+      if (secondary_put_object_promises.length>0) {
+        Promise.all(secondary_put_object_promises).then(secondaryPutObjectResponses=> {
+          let result = secondaryPutObjectResponses.map((x, idx)=> {
+            return {
+              bucket_name: opts.bucket_names_and_regions[idx+opts.priorityLevel].bucket_name,
+              region: opts.bucket_names_and_regions[idx+opts.priorityLevel].region,
+              key: opts.key,
+              path: opts.key,
+              acl: opts.acl,
+              contentType: opts.contentType,
+              contentDisposition: opts.contentDisposition,
+              contentEncoding: opts.contentEncoding,
+              storageClass: opts.storageClass,
+              serverSideEncryption: opts.serverSideEncryption,
+              metadata: opts.metadata,
+              etag: x.ETag,
+              versionId: x.VersionId 
+            }
+          });
+        }).catch(err=> {
+            console.error(`@infurnia/s3-multer/secondaryPutObject===> `, err);
+            throw err;
         });
-      });
+      }
+
+      //define promise.all on the primary uploads
+      Promise.all(primary_put_object_promises).then(primaryPutObjectResponses=> {
+        let result = primaryPutObjectResponses.map((x, idx)=> {
+          return {
+            bucket_name: opts.bucket_names_and_regions[idx].bucket_name,
+            region: opts.bucket_names_and_regions[idx].region,
+            key: opts.key,
+            path: opts.key,
+            acl: opts.acl,
+            contentType: opts.contentType,
+            contentDisposition: opts.contentDisposition,
+            contentEncoding: opts.contentEncoding,
+            storageClass: opts.storageClass,
+            serverSideEncryption: opts.serverSideEncryption,
+            metadata: opts.metadata,
+            etag: x.ETag,
+            versionId: x.VersionId 
+          }
+        });
+        //execute the callback
+        cb(null, {'s3_uploads': result});
+      }).catch(err=> {
+        console.error(`@infurnia/s3-multer/primaryPutObject===> `, err);
+        return cb(err);
+      }); 
 
     });
   })
 }
 
-S3Storage.prototype._removeFile = function (req, file, cb) {
-  this.s3.deleteObject({ Bucket: file.bucket, Key: file.key }, cb)
-}
+// S3Storage.prototype._removeFile = function (req, file, cb) {
+//   this.s3.deleteObject({ Bucket: file.bucket, Key: file.key }, cb)
+// }
 
 module.exports = function (opts) {
   return new S3Storage(opts)
