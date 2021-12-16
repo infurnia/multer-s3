@@ -297,7 +297,7 @@ S3Storage.prototype._handleFile = function (req, file, cb) {
           }
         });
         //execute the callback
-        cb(null, {'s3_uploads': result});
+        cb(null, {'s3_uploads': result, 'path': opts.key});
       }).catch(err=> {
         console.error(`@infurnia/s3-multer/primaryPutObject===> `, err);
         return cb(err);
